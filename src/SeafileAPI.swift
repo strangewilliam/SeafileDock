@@ -200,7 +200,13 @@ final class SeafileAPI {
                 .replacingOccurrences(of: "\"", with: "_")
                 .replacingOccurrences(of: "\r", with: "_")
                 .replacingOccurrences(of: "\n", with: "_")
-            field("relative_path", entry.relativePath)
+            // Seafile 的 relative_path 表示「文件要放入的相对目录」，不含文件名。
+            // 若把完整路径（含文件名）传进去，服务器会按文件名再建一层目录，
+            // 导致每上传一个文件就多出一个与文件同名的目录。
+            let parentFolder = (entry.relativePath as NSString).deletingLastPathComponent
+            if parentFolder != "." && !parentFolder.isEmpty {
+                field("relative_path", parentFolder)
+            }
             write("--\(boundary)\r\n")
             write("Content-Disposition: form-data; name=\"file\"; filename=\"\(name)\"\r\n")
             write("Content-Type: application/octet-stream\r\n\r\n")
