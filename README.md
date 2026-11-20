@@ -85,11 +85,15 @@ SeafileDock/
 │   ├── SeafileAPI.swift   # Seafile Web API 封装（列目录/上传/下载）
 │   ├── Store.swift        # 状态管理、拖拽展开、下载调度、自检
 │   └── WidgetView.swift   # SwiftUI 界面
-├── AppIcon.icns           # 应用图标源文件
+├── tools/
+│   └── make_icon.swift    # 应用图标生成器（矢量绘制，构建时自动生成 icns）
 ├── Info.plist             # App bundle 配置
-├── build.sh               # 一键编译打包脚本
+├── build.sh               # 一键编译打包脚本（含图标生成）
+├── LICENSE                # MIT 许可
 └── README.md
 ```
+
+图标不入库：构建时 `build.sh` 会调用 `tools/make_icon.swift` 现场生成 `AppIcon.icns`，因此仓库保持纯文本、图标完全可复现。
 
 ## 许可
 

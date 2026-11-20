@@ -20,9 +20,20 @@ swiftc -O -parse-as-library -swift-version 5 \
     "$ROOT"/src/Store.swift \
     "$ROOT"/src/WidgetView.swift
 
+echo "==> 生成/准备应用图标"
+ICON="$ROOT/AppIcon.icns"
+if [ ! -f "$ICON" ]; then
+    # 仓库不含二进制图标，用 tools/make_icon.swift 现场生成（纯矢量绘制）
+    ICONSET="$(mktemp -d)/SeafileDock.iconset"
+    swiftc -o /tmp/seafiledock_make_icon "$ROOT/tools/make_icon.swift"
+    /tmp/seafiledock_make_icon "$ICONSET"
+    iconutil -c icns "$ICONSET" -o "$ICON"
+    rm -rf "$(dirname "$ICONSET")"
+fi
+
 echo "==> 组装 app bundle"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
-cp "$ROOT/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+cp "$ICON" "$APP/Contents/Resources/AppIcon.icns"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
 echo "==> ad-hoc 签名"
