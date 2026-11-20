@@ -283,6 +283,48 @@ final class DockStore: ObservableObject {
         message = "正在取消…"
     }
 
+    // MARK: - 删除
+
+    /// 右键删除入口：先弹确认框，确认后再真正删除（云端操作不可恢复）
+    func confirmDelete(_ item: SeafItem) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        if item.isDir {
+            alert.messageText = "删除文件夹「\(item.name)」？"
+            alert.informativeText = "该文件夹及其中的全部内容都会从云端删除，且无法恢复。"
+        } else {
+            alert.messageText = "删除文件「\(item.name)」？"
+            alert.informativeText = "该文件会从云端删除，且无法恢复。"
+        }
+        alert.addButton(withTitle: "删除")
+        alert.addButton(withTitle: "取消")
+        // 删除不可恢复：把「取消」设为默认按钮，回车不会误删
+        alert.buttons.first?.keyEquivalent = ""
+        alert.buttons.last?.keyEquivalent = "\r"
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return }
+        Task { @MainActor in await self.delete(item) }
+    }
+
+    private func delete(_ item: SeafItem) async {
+        guard let client = ensureAPI() else { return }
+        let remote = SeafileAPI.join(path, item.name)
+        isBusy = true
+        isError = false
+        busyLabel = "正在删除 \(item.name)…"
+        message = busyLabel
+        do {
+            try await client.delete(path: remote, isDir: item.isDir)
+            isBusy = false
+            message = "已删除 \(item.name)"
+            await load()
+        } catch {
+            isBusy = false
+            fail(error)
+        }
+    }
+
     // MARK: - 设置辅助
 
     func loadRepos() async {
@@ -378,6 +420,18 @@ enum SelfTest {
                     try? FileManager.default.removeItem(at: tmp)
                 }
             }
+            // 删除链路验证：上传临时文件 → 删除 → 确认已不在目录列表
+            let probeName = "__sd_delete_probe__.txt"
+            let probeURL = URL(fileURLWithPath: NSTemporaryDirectory() + probeName)
+            try? "delete probe".write(to: probeURL, atomically: true, encoding: .utf8)
+            let probe = UploadEntry(fileURL: probeURL, relativePath: probeName)
+            try await api.upload(entries: [probe], parentDir: "/") { _ in }
+            emit("DELETE_PROBE_UPLOADED=1")
+            try await api.delete(path: "/" + probeName, isDir: false)
+            let after = try await api.list(path: "/")
+            emit("DELETE_PROBE_GONE=\(!after.contains { $0.name == probeName })")
+            try? FileManager.default.removeItem(at: probeURL)
+
             let repos = try await api.listRepos()
             emit("REPOS=\(repos.count)")
             emit("RESULT=PASS")

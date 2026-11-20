@@ -235,6 +235,17 @@ final class SeafileAPI {
         try Self.check(resp, data)
     }
 
+    // MARK: - 删除
+
+    /// 删除云端文件或文件夹（文件夹会连同其中所有内容一起删除，不可恢复）
+    func delete(path: String, isDir: Bool) async throws {
+        let kind = isDir ? "dir" : "file"
+        var req = try repoRequest("/\(kind)/?p=\(Self.encodePath(path))")
+        req.httpMethod = "DELETE"
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        try Self.check(resp, data)
+    }
+
     // MARK: - 下载
 
     func uniqueLocalURL(for name: String, in dir: URL) -> URL {

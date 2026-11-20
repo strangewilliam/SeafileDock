@@ -319,6 +319,13 @@ struct FileRow: View {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(item.name, forType: .string)
             }
+            Divider()
+            Button(role: .destructive) {
+                store.confirmDelete(item)
+            } label: {
+                Label(item.isDir ? "删除文件夹（含全部内容）" : "删除文件",
+                      systemImage: "trash")
+            }
         }
     }
 
