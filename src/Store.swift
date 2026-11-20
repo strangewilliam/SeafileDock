@@ -230,13 +230,20 @@ final class DockStore: ObservableObject {
     // MARK: - 下载
 
     func download(_ item: SeafItem) async {
+        // 防止连点导致重复下载出多个副本
+        if isBusy { return }
         guard let client = ensureAPI() else { return }
         let dir = URL(fileURLWithPath: settings.downloadDir, isDirectory: true)
         let remote = SeafileAPI.join(path, item.name)
         cancelRequested = false
         isBusy = true
         isError = false
-        progress = nil
+        progress = 0
+
+        defer {
+            isBusy = false
+            progress = nil
+        }
 
         if item.isDir {
             busyLabel = "正在读取文件夹结构…"
@@ -244,36 +251,47 @@ final class DockStore: ObservableObject {
             do {
                 let root = try await client.downloadFolder(
                     remotePath: remote, name: item.name, to: dir,
-                    onFileDone: { [weak self] done, total in
+                    onProgress: { [weak self] done, total, frac in
                         Task { @MainActor in
-                            self?.progress = Double(done) / Double(max(1, total))
-                            self?.busyLabel = "下载中 \(done)/\(total) 个文件"
+                            self?.progress = frac
+                            self?.busyLabel = "下载中 \(done)/\(total) 个文件 · \(Int(frac * 100))%"
                             self?.message = self?.busyLabel ?? ""
                         }
                     },
                     shouldCancel: { [weak self] in self?.cancelRequested ?? false }
                 )
-                isBusy = false
-                progress = nil
-                message = "已下载到 \(root.lastPathComponent)"
+                message = "已下载 \(root.lastPathComponent) 到 \(dir.lastPathComponent)"
                 NSWorkspace.shared.activateFileViewerSelecting([root])
             } catch {
-                isBusy = false
-                progress = nil
-                fail(error)
+                if !(error is CancellationError) && error.localizedDescription != APIError.cancelled.localizedDescription {
+                    fail(error)
+                } else {
+                    message = "已取消下载"
+                }
             }
         } else {
             busyLabel = "下载 \(item.name)…"
             message = busyLabel
             do {
-                let dest = try await client.downloadFile(remotePath: remote,
-                                                        name: item.name, to: dir)
-                isBusy = false
-                message = "已下载 \(item.name)（\(Self.formatSize(item.size))）"
+                let dest = try await client.downloadFile(
+                    remotePath: remote, name: item.name, to: dir,
+                    onProgress: { [weak self] frac in
+                        Task { @MainActor in
+                            self?.progress = frac
+                            self?.busyLabel = "下载 \(item.name) · \(Int(frac * 100))%"
+                            self?.message = self?.busyLabel ?? ""
+                        }
+                    },
+                    shouldCancel: { [weak self] in self?.cancelRequested ?? false }
+                )
+                message = "已下载 \(item.name) 到 \(dir.lastPathComponent)"
                 NSWorkspace.shared.activateFileViewerSelecting([dest])
             } catch {
-                isBusy = false
-                fail(error)
+                if error.localizedDescription != APIError.cancelled.localizedDescription {
+                    fail(error)
+                } else {
+                    message = "已取消下载"
+                }
             }
         }
     }
@@ -406,6 +424,22 @@ enum SelfTest {
             }
             let link = try await api.uploadLink(parentDir: "/")
             emit("UPLOAD_LINK_OK=\(link.host ?? "")")
+
+            // 下载进度验证：进度回调应被触发且最终到达 1.0
+            if let dir = items.first(where: { $0.isDir }) {
+                let sub = try await api.list(path: "/" + dir.name)
+                if let file = sub.first(where: { !$0.isDir && $0.size < 200_000 }) {
+                    let tmpDir = URL(fileURLWithPath: NSTemporaryDirectory() + "sd-progress-probe")
+                    var progressValues: [Double] = []
+                    _ = try await api.downloadFile(
+                        remotePath: "/" + dir.name + "/" + file.name,
+                        name: file.name, to: tmpDir,
+                        onProgress: { frac in progressValues.append(frac) })
+                    emit("DOWNLOAD_PROGRESS_CALLS=\(progressValues.count)")
+                    emit("DOWNLOAD_PROGRESS_REACHED_1=\(progressValues.contains { $0 >= 0.99 })")
+                    try? FileManager.default.removeItem(at: tmpDir)
+                }
+            }
 
             if let dir = items.first(where: { $0.isDir }) {
                 let sub = try await api.list(path: "/" + dir.name)

@@ -296,6 +296,7 @@ struct FileRow: View {
                     .foregroundStyle(Color.accentColor.opacity(0.85))
             }
             .buttonStyle(.borderless)
+            .disabled(store.isBusy)
             .help(item.isDir ? "下载整个文件夹到 \(store.settings.downloadDir)" : "下载到 \(store.settings.downloadDir)")
         }
         .padding(.horizontal, 11)
@@ -314,6 +315,7 @@ struct FileRow: View {
             Button("下载\(item.isDir ? "整个文件夹" : "")到下载目录") {
                 Task { await store.download(item) }
             }
+            .disabled(store.isBusy)
             Divider()
             Button("复制名称") {
                 NSPasteboard.general.clearContents()
@@ -367,7 +369,7 @@ struct StatusBar: View {
                 .truncationMode(.middle)
             Spacer(minLength: 3)
             if let p = store.progress {
-                ProgressView(value: p).frame(width: 56)
+                ProgressView(value: p).frame(width: 72)
                 Text("\(Int(p * 100))%")
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundStyle(.secondary)

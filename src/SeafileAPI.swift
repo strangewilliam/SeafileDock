@@ -59,6 +59,58 @@ final class UploadProgressDelegate: NSObject, URLSessionTaskDelegate, @unchecked
     }
 }
 
+/// 下载进度回调：已下载字节数 / 预期总字节数（-1 表示服务器未给出长度）
+final class DownloadProgressDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+    private let onProgress: (Int64, Int64) -> Void
+    private let onComplete: (Result<URL, Error>) -> Void
+    private let shouldCancel: () -> Bool
+    private var movedURL: URL?
+
+    init(onProgress: @escaping (Int64, Int64) -> Void,
+         shouldCancel: @escaping () -> Bool,
+         onComplete: @escaping (Result<URL, Error>) -> Void) {
+        self.onProgress = onProgress
+        self.shouldCancel = shouldCancel
+        self.onComplete = onComplete
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didWriteData bytesWritten: Int64,
+                    totalBytesWritten: Int64,
+                    totalBytesExpectedToWrite: Int64) {
+        if shouldCancel() { downloadTask.cancel(); return }
+        onProgress(totalBytesWritten, totalBytesExpectedToWrite)
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didFinishDownloadingTo location: URL) {
+        // 复制到自有临时位置，避免会话结束后系统清理掉原始临时文件
+        let dest = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sd-dl-\(UUID().uuidString).tmp")
+        do {
+            try FileManager.default.copyItem(at: location, to: dest)
+            movedURL = dest
+        } catch {
+            movedURL = nil
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    didCompleteWithError error: Error?) {
+        session.finishTasksAndInvalidate()
+        if let error = error {
+            onComplete(.failure(error))
+        } else if let http = task.response as? HTTPURLResponse,
+                  !(200...299).contains(http.statusCode) {
+            onComplete(.failure(APIError.badStatus(http.statusCode, "")))
+        } else if let url = movedURL {
+            onComplete(.success(url))
+        } else {
+            onComplete(.failure(APIError.invalidResponse))
+        }
+    }
+}
+
 final class SeafileAPI {
     let server: String
     let repoID: String
@@ -263,17 +315,31 @@ final class SeafileAPI {
         return candidate
     }
 
-    func downloadFile(remotePath: String, name: String, to dir: URL) async throws -> URL {
+    /// 带字节级进度的单文件下载
+    func downloadFile(remotePath: String, name: String, to dir: URL,
+                      onProgress: ((Double) -> Void)? = nil,
+                      shouldCancel: (() -> Bool)? = nil) async throws -> URL {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let link = try await downloadLink(path: remotePath)
-        let (temp, resp) = try await URLSession.shared.download(from: link)
-        try Self.check(resp, Data())
+        let temp: URL = try await withCheckedThrowingContinuation { continuation in
+            let delegate = DownloadProgressDelegate(
+                onProgress: { written, expected in
+                    // expected 为 -1 时无法给出百分比，报 0 让界面显示"不确定"状态
+                    let frac = expected > 0 ? min(1.0, Double(written) / Double(expected)) : 0
+                    onProgress?(frac)
+                },
+                shouldCancel: shouldCancel ?? { false },
+                onComplete: { result in continuation.resume(with: result) }
+            )
+            let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
+            session.downloadTask(with: link).resume()
+        }
+        defer { try? FileManager.default.removeItem(at: temp) }
         let dest = uniqueLocalURL(for: name, in: dir)
         do {
             try FileManager.default.moveItem(at: temp, to: dest)
         } catch {
             try FileManager.default.copyItem(at: temp, to: dest)
-            try? FileManager.default.removeItem(at: temp)
         }
         return dest
     }
@@ -299,8 +365,9 @@ final class SeafileAPI {
     }
 
     /// 递归下载整个云端文件夹到 本地目录/文件夹名/
+    /// 进度按「已完成文件数 + 当前文件完成度」折算成整体百分比
     func downloadFolder(remotePath: String, name: String, to dir: URL,
-                        onFileDone: @escaping (Int, Int) -> Void,
+                        onProgress: @escaping (Int, Int, Double) -> Void,
                         shouldCancel: @escaping () -> Bool) async throws -> URL {
         let files = try await collectFiles(remotePath: remotePath, relative: "")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -309,22 +376,26 @@ final class SeafileAPI {
 
         for (index, file) in files.enumerated() {
             if shouldCancel() { throw APIError.cancelled }
-            let link = try await downloadLink(path: file.path)
-            let (temp, resp) = try await URLSession.shared.download(from: link)
-            try Self.check(resp, Data())
             let dest = root.appendingPathComponent(file.relative)
             try? FileManager.default.createDirectory(at: dest.deletingLastPathComponent(),
                                                      withIntermediateDirectories: true)
             if FileManager.default.fileExists(atPath: dest.path) {
                 try? FileManager.default.removeItem(at: dest)
             }
-            do {
-                try FileManager.default.moveItem(at: temp, to: dest)
-            } catch {
-                try FileManager.default.copyItem(at: temp, to: dest)
-                try? FileManager.default.removeItem(at: temp)
+            let temp = try await downloadFile(remotePath: file.path, name: dest.lastPathComponent,
+                                              to: dest.deletingLastPathComponent(),
+                                              onProgress: { frac in
+                                                  let overall = (Double(index) + frac) / Double(max(1, files.count))
+                                                  onProgress(index, files.count, overall)
+                                              },
+                                              shouldCancel: shouldCancel)
+            // downloadFile 已按名字落到目标目录；若因重名被改名则纠正到期望路径
+            if temp.path != dest.path {
+                try? FileManager.default.removeItem(at: dest)
+                try? FileManager.default.moveItem(at: temp, to: dest)
             }
-            onFileDone(index + 1, files.count)
+            onProgress(index + 1, files.count,
+                       Double(index + 1) / Double(max(1, files.count)))
         }
         return root
     }
