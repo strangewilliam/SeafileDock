@@ -15,6 +15,7 @@ struct WidgetRoot: View {
                 HeaderBar()
                 ToolBar()
                 SearchBar()
+                if store.isSelectionMode { SelectionBar() }
                 Divider().opacity(0.5)
                 FileListView()
                 Divider().opacity(0.5)
@@ -168,6 +169,16 @@ struct ToolBar: View {
             IconButton(system: "arrow.clockwise", help: "刷新") {
                 Task { await store.refresh() }
             }
+            Button {
+                store.toggleSelectionMode()
+            } label: {
+                Image(systemName: store.isSelectionMode ? "checkmark.circle.fill" : "checkmark.circle")
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(width: 22, height: 20)
+                    .foregroundStyle(store.isSelectionMode ? Color.accentColor : Color.secondary)
+            }
+            .buttonStyle(.borderless)
+            .help(store.isSelectionMode ? "退出多选模式" : "进入多选模式（可批量删除）")
             Menu {
                 ForEach(SortMode.allCases) { mode in
                     Button {
@@ -228,6 +239,40 @@ struct SearchBar: View {
     }
 }
 
+// MARK: - 多选操作条
+
+struct SelectionBar: View {
+    @EnvironmentObject var store: DockStore
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button("全选") { store.selectAll() }
+                .buttonStyle(.borderless).font(.system(size: 10))
+            Button("清空") { store.clearSelection() }
+                .buttonStyle(.borderless).font(.system(size: 10))
+                .disabled(store.selectedIDs.isEmpty)
+            Spacer(minLength: 4)
+            Text("已选 \(store.selectedItems.count) 项")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(store.selectedItems.isEmpty ? Color.secondary : Color.accentColor)
+            Button(role: .destructive) {
+                store.confirmDeleteSelected()
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "trash").font(.system(size: 10))
+                    Text("删除所选")
+                }
+            }
+            .buttonStyle(.borderless)
+            .font(.system(size: 10))
+            .disabled(store.selectedItems.isEmpty || store.isBusy)
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 5)
+        .background(Color.accentColor.opacity(0.10))
+    }
+}
+
 // MARK: - 文件列表
 
 struct FileListView: View {
@@ -268,6 +313,12 @@ struct FileRow: View {
 
     var body: some View {
         HStack(spacing: 9) {
+            if store.isSelectionMode {
+                Image(systemName: store.isSelected(item) ? "checkmark.square.fill" : "square")
+                    .font(.system(size: 14))
+                    .foregroundStyle(store.isSelected(item) ? Color.accentColor : Color.secondary)
+                    .frame(width: 16)
+            }
             Image(systemName: item.isDir ? "folder.fill" : icon(for: item.name))
                 .font(.system(size: 14))
                 .foregroundStyle(item.isDir ? Color.accentColor : Color.secondary)
@@ -288,21 +339,27 @@ struct FileRow: View {
 
             Spacer(minLength: 4)
 
-            Button {
-                Task { await store.download(item) }
-            } label: {
-                Image(systemName: item.isDir ? "square.and.arrow.down" : "arrow.down.circle")
-                    .font(.system(size: 12))
-                    .foregroundStyle(Color.accentColor.opacity(0.85))
+            if !store.isSelectionMode {
+                Button {
+                    Task { await store.download(item) }
+                } label: {
+                    Image(systemName: item.isDir ? "square.and.arrow.down" : "arrow.down.circle")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.accentColor.opacity(0.85))
+                }
+                .buttonStyle(.borderless)
+                .disabled(store.isBusy)
+                .help(item.isDir ? "下载整个文件夹到 \(store.settings.downloadDir)" : "下载到 \(store.settings.downloadDir)")
             }
-            .buttonStyle(.borderless)
-            .disabled(store.isBusy)
-            .help(item.isDir ? "下载整个文件夹到 \(store.settings.downloadDir)" : "下载到 \(store.settings.downloadDir)")
         }
         .padding(.horizontal, 11)
         .padding(.vertical, 5)
         .contentShape(Rectangle())
+        .onTapGesture {
+            if store.isSelectionMode { store.toggleSelect(item) }
+        }
         .onTapGesture(count: 2) {
+            guard !store.isSelectionMode else { return }
             Task {
                 if item.isDir { await store.enter(item) }
                 else { await store.download(item) }

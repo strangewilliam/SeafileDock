@@ -34,6 +34,10 @@ final class DockStore: ObservableObject {
     @Published var showPicker: Bool = false
     @Published var repos: [RepoInfo] = []
 
+    // 多选（批量删除）
+    @Published var isSelectionMode: Bool = false
+    @Published var selectedIDs: Set<String> = []
+
     private var api: SeafileAPI?
     private var cancelRequested = false
     private var settingsCancellable: AnyCancellable?
@@ -71,6 +75,9 @@ final class DockStore: ObservableObject {
 
     var canGoUp: Bool { path != "/" }
 
+    /// 当前选中的条目（按目录原始顺序，便于批量删除时逐项处理）
+    var selectedItems: [SeafItem] { items.filter { selectedIDs.contains($0.id) } }
+
     // MARK: - 连接
 
     private func ensureAPI() -> SeafileAPI? {
@@ -88,6 +95,8 @@ final class DockStore: ObservableObject {
     }
 
     func load() async {
+        // 目录内容可能变化（刷新/切换），旧选中项失效
+        selectedIDs.removeAll()
         guard let client = ensureAPI() else {
             UserDefaults.standard.set("FAIL no-token", forKey: Self.statusKey)
             return
@@ -301,6 +310,85 @@ final class DockStore: ObservableObject {
         message = "正在取消…"
     }
 
+    // MARK: - 多选批量删除
+
+    func toggleSelectionMode() {
+        isSelectionMode.toggle()
+        if !isSelectionMode { selectedIDs.removeAll() }
+    }
+
+    func toggleSelect(_ item: SeafItem) {
+        if selectedIDs.contains(item.id) {
+            selectedIDs.remove(item.id)
+        } else {
+            selectedIDs.insert(item.id)
+        }
+    }
+
+    func isSelected(_ item: SeafItem) -> Bool { selectedIDs.contains(item.id) }
+
+    func selectAll() { selectedIDs = Set(displayItems.map { $0.id }) }
+    func clearSelection() { selectedIDs.removeAll() }
+
+    /// 批量删除入口：先确认（列出目标），再逐项删除；云端操作不可恢复
+    func confirmDeleteSelected() {
+        let targets = selectedItems
+        guard !targets.isEmpty else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "删除选中的 \(targets.count) 项？"
+        let dirCount = targets.filter { $0.isDir }.count
+        var detail = "以下项目将从云端删除，且无法恢复：\n"
+        for item in targets.prefix(8) {
+            detail += "\n· \(item.name)" + (item.isDir ? "（文件夹，含全部内容）" : "")
+        }
+        if targets.count > 8 { detail += "\n…以及其他 \(targets.count - 8) 项" }
+        if dirCount > 0 { detail += "\n\n文件夹会连同其中全部内容一起删除。" }
+        alert.informativeText = detail
+        alert.addButton(withTitle: "删除 \(targets.count) 项")
+        alert.addButton(withTitle: "取消")
+        // 删除不可恢复：把「取消」设为默认按钮，回车不会误删
+        alert.buttons.first?.keyEquivalent = ""
+        alert.buttons.last?.keyEquivalent = "\r"
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return }
+        Task { @MainActor in await self.deleteSelected(targets) }
+    }
+
+    private func deleteSelected(_ targets: [SeafItem]) async {
+        guard let client = ensureAPI() else { return }
+        if isBusy { return }
+        isBusy = true
+        isError = false
+        cancelRequested = false
+        defer { isBusy = false; progress = nil }
+
+        var deleted = 0
+        var failed: [String] = []
+        for (index, item) in targets.enumerated() {
+            if cancelRequested { break }
+            progress = Double(index) / Double(max(1, targets.count))
+            busyLabel = "正在删除 \(index + 1)/\(targets.count)：\(item.name)"
+            message = busyLabel
+            do {
+                try await client.delete(path: SeafileAPI.join(path, item.name), isDir: item.isDir)
+                deleted += 1
+            } catch {
+                failed.append(item.name)
+            }
+        }
+        await load()
+        if failed.isEmpty {
+            message = "已删除 \(deleted) 项"
+            isError = false
+        } else {
+            let names = failed.prefix(3).joined(separator: "、")
+            message = "已删除 \(deleted) 项，\(failed.count) 项失败：\(names)"
+            isError = true
+        }
+    }
+
     // MARK: - 删除
 
     /// 右键删除入口：先弹确认框，确认后再真正删除（云端操作不可恢复）
@@ -465,6 +553,35 @@ enum SelfTest {
             let after = try await api.list(path: "/")
             emit("DELETE_PROBE_GONE=\(!after.contains { $0.name == probeName })")
             try? FileManager.default.removeItem(at: probeURL)
+
+            // 批量删除验证：连续上传 3 个临时文件 → 逐个删除 → 确认全部消失
+            var batchNames: [String] = []
+            for i in 1...3 {
+                let n = "__sd_batch_\(i).txt"
+                let u = URL(fileURLWithPath: NSTemporaryDirectory() + n)
+                try? "batch \(i)".write(to: u, atomically: true, encoding: .utf8)
+                try await api.upload(entries: [UploadEntry(fileURL: u, relativePath: n)], parentDir: "/") { _ in }
+                batchNames.append(n)
+                try? FileManager.default.removeItem(at: u)
+            }
+            for n in batchNames { try await api.delete(path: "/" + n, isDir: false) }
+            let afterBatch = try await api.list(path: "/")
+            let batchGone = batchNames.allSatisfy { n in !afterBatch.contains { $0.name == n } }
+            emit("BATCH_DELETE_GONE=\(batchGone)")
+
+            // 多选状态逻辑（纯内存）：选中/取消/清空
+            let selectionOK = await MainActor.run { () -> Bool in
+                let store = DockStore()
+                let a = SeafItem(id: "pa", name: "a", type: "file", size: 0, mtime: 0)
+                let b = SeafItem(id: "pb", name: "b", type: "dir", size: 0, mtime: 0)
+                store.toggleSelect(a); store.toggleSelect(b)
+                guard store.selectedIDs.count == 2 else { return false }
+                store.toggleSelect(a)
+                guard store.selectedIDs.count == 1 else { return false }
+                store.clearSelection()
+                return store.selectedIDs.isEmpty
+            }
+            emit("SELECTION_LOGIC_OK=\(selectionOK)")
 
             let repos = try await api.listRepos()
             emit("REPOS=\(repos.count)")
