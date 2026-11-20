@@ -1,0 +1,12 @@
+# 编译产物（由 build.sh 生成在仓库同级目录）
+../SeafileDock.app/
+*.app/
+
+# macOS
+.DS_Store
+*.swp
+*~
+
+# 本地私有配置 / 用户数据
+*.local
+secrets.*
